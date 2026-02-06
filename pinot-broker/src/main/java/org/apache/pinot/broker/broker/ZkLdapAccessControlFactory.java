@@ -18,6 +18,8 @@
  */
 package org.apache.pinot.broker.broker;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -25,6 +27,7 @@ import java.util.Hashtable;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import javax.naming.Context;
 import javax.naming.NamingEnumeration;
@@ -96,6 +99,7 @@ public class ZkLdapAccessControlFactory extends AccessControlFactory {
     private final String _bindPassword;
     private final AccessControlUserCache _userCache;
     private final ZkHelixPropertyStore<ZNRecord> _propertyStore;
+    private final Cache<String, Boolean> _authCache;
 
     public ZkLdapAccessControl(PinotConfiguration config, AccessControlUserCache userCache,
         ZkHelixPropertyStore<ZNRecord> propertyStore) {
@@ -106,6 +110,11 @@ public class ZkLdapAccessControlFactory extends AccessControlFactory {
       _bindPassword = config.getProperty(LDAP_BIND_PASSWORD);
       _userCache = userCache;
       _propertyStore = propertyStore;
+
+      _authCache = CacheBuilder.newBuilder()
+          .expireAfterWrite(10, TimeUnit.MINUTES)
+          .maximumSize(1000)
+          .build();
 
       if (StringUtils.isBlank(_ldapUrl) || StringUtils.isBlank(_baseDn)) {
         LOGGER.warn("LDAP Access Control configured but missing URL or Base DN. Authentication will fail.");
@@ -222,6 +231,12 @@ public class ZkLdapAccessControlFactory extends AccessControlFactory {
     }
 
     private boolean authenticateLdap(String username, String password) {
+      String cacheKey = username + ":" + password;
+      Boolean cachedResult = _authCache.getIfPresent(cacheKey);
+      if (cachedResult != null && cachedResult) {
+        return true;
+      }
+
       if (_ldapUrl == null) {
         return false;
       }
@@ -262,6 +277,8 @@ public class ZkLdapAccessControlFactory extends AccessControlFactory {
         env.put(Context.SECURITY_CREDENTIALS, password);
 
         ctx = new InitialDirContext(env);
+        // If we reached here, authentication was successful
+        _authCache.put(cacheKey, true);
         return true;
       } catch (NamingException e) {
         LOGGER.error("LDAP authentication failed for user: {}", username, e);
